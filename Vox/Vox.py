@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 from typing import Optional
 
+
 load_dotenv(dotenv_path="Vox/TOKEN.env")
 
 

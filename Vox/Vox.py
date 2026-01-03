@@ -32,6 +32,8 @@ class PrivateChannelView(View):
         death= discord.utils.get(guild.emojis, name="death")
         add= discord.utils.get(guild.emojis, name="add")
         unadd= discord.utils.get(guild.emojis, name="unadd")
+        lock= discord.utils.get(guild.emojis, name="lock")
+        kick= discord.utils.get(guild.emojis, name="kick")
         
         self.add_item(Button(emoji=share, style=discord.ButtonStyle.secondary,  custom_id="create_private_channel"))
         self.add_item(Button(emoji=death, style=discord.ButtonStyle.secondary,  custom_id="delete_private_channel"))
@@ -263,6 +265,345 @@ async def on_interaction(interaction: discord.Interaction):
                 "You don't have a private channel to remove members from.",
                 ephemeral=True
             )    
+
+CATEGORY_NAME = "Vox"
+
+# =====================
+# HELPERS
+# =====================
+
+def get_member_voice_channel(category: discord.CategoryChannel, member: discord.Member):
+    for ch in category.voice_channels:
+        perms = ch.overwrites_for(member)
+        if perms.view_channel:
+            return ch
+    return None
+
+
+async def get_or_create_category(guild: discord.Guild):
+    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+    if not category:
+        category = await guild.create_category(CATEGORY_NAME)
+    return category
+
+
+# =====================
+# MAIN UI VIEW
+# =====================
+
+
+
+
+class PrivateVoiceView(View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=None)
+
+        def e(name, fallback):
+            return discord.utils.get(guild.emojis, name=name) or fallback
+
+
+
+        self.add_item(Button(emoji=e("share", "🎙️"), style=discord.ButtonStyle.secondary, custom_id="create_voice"))
+        self.add_item(Button(emoji=e("death", "🗑️"), style=discord.ButtonStyle.secondary, custom_id="delete_voice"))
+        self.add_item(Button(emoji=e("add", "➕"), style=discord.ButtonStyle.secondary, custom_id="add_member"))
+        self.add_item(Button(emoji=e("unadd", "➖"), style=discord.ButtonStyle.secondary, custom_id="remove_member"))
+        self.add_item(Button(emoji=e("lock", "🔒"), style=discord.ButtonStyle.secondary, custom_id="toggle_lock"))
+        self.add_item(Button(emoji=e("kick", "👢"), style=discord.ButtonStyle.secondary, custom_id="kick_member"))
+
+# =====================
+# KICK MEMBER VIEW 
+# =====================
+
+class KickMemberView(View):
+    def __init__(self, channel: discord.VoiceChannel):
+        super().__init__(timeout=60)
+        self.channel = channel
+
+        members = channel.members
+
+        if not members:
+            return
+
+        options = [
+            discord.SelectOption(
+                label=m.display_name,
+                value=str(m.id)
+            )
+            for m in members
+        ]
+
+        self.select = Select(
+            placeholder="Select members to KICK from VC",
+            options=options,
+            min_values=1,
+            max_values=len(options)
+        )
+
+        self.select.callback = self.callback
+        self.add_item(self.select)
+
+    async def callback(self, interaction: discord.Interaction):
+        kicked = []
+
+        for mid in self.select.values:
+            member = interaction.guild.get_member(int(mid))
+            if member and member.voice and member.voice.channel == self.channel:
+                await member.move_to(None)
+                kicked.append(member.mention)
+
+        await interaction.response.send_message(
+            f"👢 Kicked from VC: {', '.join(kicked)}",
+            ephemeral=True
+        )
+
+# =====================
+# ADD MEMBER VIEW
+# =====================
+
+class AddMemberView(View):
+    def __init__(self, channel: discord.VoiceChannel):
+        super().__init__(timeout=60)
+        self.channel = channel
+
+        options = [
+            discord.SelectOption(label=m.display_name, value=str(m.id))
+            for m in channel.guild.members
+            if not channel.overwrites_for(m).view_channel and not m.bot
+        ]
+
+        self.select = Select(
+            placeholder="Select members to ADD",
+            options=options[:25],
+            min_values=1,
+            max_values=len(options[:25])
+        )
+
+        self.select.callback = self.callback
+        self.add_item(self.select)
+
+    async def callback(self, interaction: discord.Interaction):
+        added = []
+
+        for mid in self.select.values:
+            member = interaction.guild.get_member(int(mid))
+            if member:
+                await self.channel.set_permissions(
+                    member,
+                    view_channel=True,
+                    connect=True,
+                    speak=True
+                )
+                added.append(member.mention)
+
+        await interaction.response.send_message(
+            f"Added: {', '.join(added)}",
+            ephemeral=True
+        )
+
+
+# =====================
+# REMOVE MEMBER VIEW
+# =====================
+
+class RemoveMemberView(View):
+    def __init__(self, channel: discord.VoiceChannel):
+        super().__init__(timeout=60)
+        self.channel = channel
+
+        members = [
+            m for m, p in channel.overwrites.items()
+            if isinstance(m, discord.Member) and p.view_channel
+        ]
+
+        options = [
+            discord.SelectOption(label=m.display_name, value=str(m.id))
+            for m in members
+        ]
+
+        self.select = Select(
+            placeholder="Select members to REMOVE",
+            options=options,
+            min_values=1,
+            max_values=len(options)
+        )
+
+        self.select.callback = self.callback
+        self.add_item(self.select)
+
+    async def callback(self, interaction: discord.Interaction):
+        removed = []
+
+        for mid in self.select.values:
+            member = interaction.guild.get_member(int(mid))
+            if member:
+                await self.channel.set_permissions(member, overwrite=None)
+                removed.append(member.mention)
+
+        await interaction.response.send_message(
+            f"Removed: {', '.join(removed)}",
+            ephemeral=True
+        )
+
+
+# =====================
+# COMMAND
+# =====================
+
+@bot.command()
+async def private_v_ui(ctx):
+    embed = discord.Embed(
+        title="🎧 Private Voice Channels",
+        description="Manage your private voice room using the buttons below.",
+        color=discord.Color.blurple()
+    )
+
+    embed.set_image(
+        url="https://cdn.discordapp.com/attachments/1456777077306163291/1456781564913389618/image.png?ex=69599d0e&is=69584b8e&hm=3f23a9ce41b8c0987c4499eed72c68a32572c4123d8a7a36ffe9feb402ddbc86&"
+    )
+
+    view = PrivateVoiceView(ctx.guild)
+    await ctx.send(embed=embed, view=view)
+
+
+# =====================
+# INTERACTIONS
+# =====================
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type != discord.InteractionType.component:
+        return
+
+    guild = interaction.guild
+    member = interaction.user
+    cid = interaction.data["custom_id"]
+
+    category = await get_or_create_category(guild)
+
+    # CREATE
+    if cid == "create_voice":
+        if get_member_voice_channel(category, member):
+            return await interaction.response.send_message(
+                "You already have a voice room.",
+                ephemeral=True
+            )
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True
+            )
+        }
+
+        channel = await guild.create_voice_channel(
+            f"🎙️ {member.name}'s room",
+            category=category,
+            overwrites=overwrites
+        )
+
+        if member.voice:
+            await member.move_to(channel)
+
+        await interaction.response.send_message(
+            f"Created {channel.mention}",
+            ephemeral=True
+        )
+
+    # DELETE
+    elif cid == "delete_voice":
+        channel = get_member_voice_channel(category, member)
+        if not channel:
+            return await interaction.response.send_message(
+                "You don't have a voice room.",
+                ephemeral=True
+            )
+
+        await channel.delete()
+        await interaction.response.send_message(
+            "Voice room deleted.",
+            ephemeral=True
+        )
+
+    # ADD
+    elif cid == "add_member":
+        channel = get_member_voice_channel(category, member)
+        if not channel:
+            return await interaction.response.send_message(
+                "You don't have a voice room.",
+                ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            "Add members:",
+            view=AddMemberView(channel),
+            ephemeral=True
+        )
+
+    # REMOVE
+    elif cid == "remove_member":
+        channel = get_member_voice_channel(category, member)
+        if not channel:
+            return await interaction.response.send_message(
+                "You don't have a voice room.",
+                ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            "Remove members:",
+            view=RemoveMemberView(channel),
+            ephemeral=True
+        )
+    # TOGGLE LOCK
+    elif cid == "toggle_lock":
+        channel = get_member_voice_channel(category, member)
+
+        if not channel:
+            return await interaction.response.send_message(
+                "You don't have a voice room.",
+                ephemeral=True
+            )
+
+        everyone = guild.default_role
+        current = channel.overwrites_for(everyone)
+
+        # If currently open → lock it
+        if current.connect is not False:
+            await channel.set_permissions(everyone, connect=False)
+            await interaction.response.send_message(
+                "🔒 Voice channel locked.",
+                ephemeral=True
+            )
+        else:
+            # If locked → unlock it
+            await channel.set_permissions(everyone, connect=True)
+            await interaction.response.send_message(
+                "🔓 Voice channel unlocked.",
+                ephemeral=True
+            )
+    # KICK FROM VC
+    elif cid == "kick_member":
+        channel = get_member_voice_channel(category, member)
+
+        if not channel:
+            return await interaction.response.send_message(
+                "You don't have a voice room.",
+                ephemeral=True
+            )
+
+        if not channel.members:
+            return await interaction.response.send_message(
+                "There is no one in your voice channel to kick.",
+                ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            "Select members to kick from the voice channel:",
+            view=KickMemberView(channel),
+            ephemeral=True
+        )
+
 
 
 bot.run(TOKEN)
